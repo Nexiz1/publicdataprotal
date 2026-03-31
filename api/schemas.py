@@ -56,6 +56,7 @@ class UmbrellaReminderRequest(BaseModel):
     event_title: Optional[str] = Field(default="☂️ 우산 챙기세요!", description="커스텀 이벤트 제목")
     notification_minutes: Optional[int] = Field(default=720, description="알림 시간 (분 전, 기본 12시간)")
     sync_calendar: bool = Field(default=False, description="구글 캘린더 등록 여부")
+    access_token: Optional[str] = Field(default=None, description="구글 OAuth Web Access Token")
 
 class DailyUmbrellaResult(BaseModel):
     date: str = Field(..., description="날짜 (YYYY-MM-DD)")

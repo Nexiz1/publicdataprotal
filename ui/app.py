@@ -3,14 +3,19 @@ import streamlit as st
 import requests
 import sys
 import os
+import urllib.parse
 import folium
 from streamlit_folium import st_folium
 from datetime import datetime
+from dotenv import load_dotenv
+
+load_dotenv()  # Load variables from .env file
 
 # 프로젝트 루트를 패스에 추가하여 core 모듈을 불러올 수 있게 함
 sys.path.append(os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 
 from core.utils import map_to_grid
+from core.database import get_user_location, save_user_location
 
 API_BASE_URL = "http://127.0.0.1:8000"
 
@@ -85,13 +90,48 @@ st.markdown("""
     </style>
     """, unsafe_allow_html=True)
 
-# --- State Management ---
-if 'lat' not in st.session_state:
+# ---# default location (Seoul City Hall)
+if "lat" not in st.session_state:
     st.session_state.lat = 37.5665
-if 'lon' not in st.session_state:
+if "lon" not in st.session_state:
     st.session_state.lon = 126.9780
-if 'search_results' not in st.session_state:
+if "search_results" not in st.session_state:
     st.session_state.search_results = []
+
+# --- OAuth Flow ---
+CLIENT_ID = os.getenv("GOOGLE_CLIENT_ID")
+CLIENT_SECRET = os.getenv("GOOGLE_CLIENT_SECRET")
+REDIRECT_URI = "http://localhost:8501"
+
+def do_oauth_exchange():
+    if "code" in st.query_params and "access_token" not in st.session_state:
+        code = st.query_params["code"]
+        token_url = "https://oauth2.googleapis.com/token"
+        data = {
+            "code": code,
+            "client_id": CLIENT_ID,
+            "client_secret": CLIENT_SECRET,
+            "redirect_uri": REDIRECT_URI,
+            "grant_type": "authorization_code"
+        }
+        r = requests.post(token_url, data=data)
+        if r.status_code == 200:
+            token_data = r.json()
+            st.session_state.access_token = token_data.get("access_token")
+            # Fetch User Email
+            user_req = requests.get("https://www.googleapis.com/oauth2/v2/userinfo", headers={"Authorization": f"Bearer {st.session_state.access_token}"})
+            if user_req.status_code == 200:
+                email = user_req.json().get("email")
+                st.session_state.email = email
+                # Restore Location
+                saved_loc = get_user_location(email)
+                if saved_loc:
+                    st.session_state.lat = saved_loc["lat"]
+                    st.session_state.lon = saved_loc["lon"]
+        st.query_params.clear()
+        st.rerun()
+
+do_oauth_exchange()
 
 # --- Helper Functions with Caching ---
 @st.cache_data(ttl=3600, show_spinner="지도 주소를 검색하는 중입니다... 🗺️")
@@ -124,9 +164,8 @@ def fetch_analysis_cached(nx, ny):
     except Exception as e:
         return {"error": str(e)}
 
-def sync_calendar_event(nx, ny, title=None, notif=None):
-    """캘린더 등록 전용 비캐시 함수"""
-    payload = {"nx": nx, "ny": ny, "sync_calendar": True}
+def sync_to_calendar(nx, ny, access_token, title=None, notif=None):
+    payload = {"nx": nx, "ny": ny, "sync_calendar": True, "access_token": access_token}
     if title: payload["event_title"] = title
     if notif: payload["notification_minutes"] = notif
     
@@ -152,24 +191,20 @@ with st.sidebar:
             
     if st.session_state.search_results:
         options = {res["display_name"]: res for res in st.session_state.search_results}
-        selected_name = st.selectbox("Select exact location:", list(options.keys()))
+        selected = st.selectbox("2. Select Your Location", list(options.keys()))
         if st.button("Apply Selection"):
-            selected_data = options[selected_name]
-            st.session_state.lat = float(selected_data["lat"])
-            st.session_state.lon = float(selected_data["lon"])
-            st.session_state.search_results = [] # clear after selection
+            st.session_state.lat = float(options[selected]["lat"])
+            st.session_state.lon = float(options[selected]["lon"])
+            if "email" in st.session_state:
+                save_user_location(st.session_state.email, st.session_state.lat, st.session_state.lon)
             st.rerun()
-
-    st.divider()
+            
+    st.markdown("---")
     
-    # Grid Info
-    nx, ny = map_to_grid(st.session_state.lat, st.session_state.lon)
-    st.caption("2. Or Tap on the map to pinpoint!")
-    st.code(f"KMA Grid: {nx}, {ny}")
-    
-    # 2. Interactive Map (folium)
-    m = folium.Map(location=[st.session_state.lat, st.session_state.lon], zoom_start=11)
-    folium.Marker([st.session_state.lat, st.session_state.lon], tooltip="Current Target").add_to(m)
+    # 2. Map Interaction
+    st.markdown("**(Or click on the map!)**")
+    m = folium.Map(location=[st.session_state.lat, st.session_state.lon], zoom_start=13)
+    folium.Marker([st.session_state.lat, st.session_state.lon], tooltip="Your Location").add_to(m)
     
     # catch clicks from the map
     map_data = st_folium(m, height=300, use_container_width=True, returned_objects=["last_clicked"])
@@ -181,11 +216,38 @@ with st.sidebar:
         if round(clicked_lat, 4) != round(st.session_state.lat, 4) or round(clicked_lon, 4) != round(st.session_state.lon, 4):
             st.session_state.lat = clicked_lat
             st.session_state.lon = clicked_lon
+            if "email" in st.session_state:
+                save_user_location(st.session_state.email, st.session_state.lat, st.session_state.lon)
             st.rerun()
+            
+    st.markdown("---")
+    
+    # Sync Google Calendar
+    st.markdown("### 📅 Google Calendar Sync")
+    if "access_token" in st.session_state:
+        st.success(f"👤 {st.session_state.email}")
+        if st.button("Sync All Rainy Days Now", use_container_width=True, type="primary"):
+            with st.spinner("Syncing..."):
+                res = sync_to_calendar(nx, ny, st.session_state.access_token)
+                if "error" in res:
+                    st.error(res["error"])
+                else:
+                    st.success(res.get("message", "Synced!"))
+        if st.button("Logout", use_container_width=True):
+            del st.session_state["access_token"]
+            del st.session_state["email"]
+            st.rerun()
+    else:
+        scope_str = "https://www.googleapis.com/auth/calendar.events https://www.googleapis.com/auth/userinfo.email"
+        auth_url = f"https://accounts.google.com/o/oauth2/v2/auth?client_id={CLIENT_ID}&redirect_uri={urllib.parse.quote(REDIRECT_URI)}&response_type=code&scope={urllib.parse.quote(scope_str)}"
+        st.link_button("🔑 Login with Google to Sync Calendar", auth_url, use_container_width=True)
 
 # --- Main UI ---
 st.title("☂️ SkyCast")
 st.markdown("##### Intelligent Weather Insights & Smart Calendar Sync")
+
+# Grid Info
+nx, ny = map_to_grid(st.session_state.lat, st.session_state.lon)
 
 # Cached initial preview call
 analysis_res = fetch_analysis_cached(nx, ny)
@@ -237,37 +299,48 @@ else:
             st.subheader("🗓️ Smart Calendar Sync")
             st.write("Automatically register rainy day alerts to your Google Calendar.")
             
-            if st.button("🚀 Sync All Rainy Days Now", key="sync_btn"):
-                with st.spinner("Syncing to Google Calendar..."):
-                    result = sync_calendar_event(nx, ny)
-                    if "error" in result:
-                        st.error(result["error"])
-                    else:
-                        events = result.get("calendar_events", [])
-                        if events:
-                            st.success(f"Synced {len(events)} events!")
-                            for ev in events:
-                                st.markdown(f"✅ {ev['date']}: [View in Calendar]({ev['html_link']})")
-                        else:
-                            st.info(result.get("message", "No rainy days to sync."))
-
-        with col_right:
-            with st.expander("⚙️ Advanced Sync Settings"):
-                st.write("Customize your reminder")
-                adv_title = st.text_input("Event Title", value="☂️ 우산 챙기세요!")
-                adv_notif = st.select_slider(
-                    "Reminder Notification",
-                    options=[30, 60, 180, 360, 720, 1440],
-                    value=720,
-                    format_func=lambda x: f"{x//60} hours before" if x >= 60 else f"{x} mins before"
-                )
-                if st.button("Sync with Custom Settings"):
+            if "access_token" in st.session_state:
+                st.success(f"Logged in as: {st.session_state.email}")
+                if st.button("🚀 Sync All Rainy Days Now", key="sync_btn"):
                     with st.spinner("Syncing to Google Calendar..."):
-                        result = sync_calendar_event(nx, ny, title=adv_title, notif=adv_notif)
+                        result = sync_to_calendar(nx, ny, st.session_state.access_token)
                         if "error" in result:
                             st.error(result["error"])
                         else:
-                            st.success("Custom sync complete!")
+                            events = result.get("calendar_events", [])
+                            if events:
+                                st.success(f"Synced {len(events)} events!")
+                                for ev in events:
+                                    st.markdown(f"✅ {ev['date']}: [View in Calendar]({ev['html_link']})")
+                            else:
+                                st.info(result.get("message", "No rainy days to sync."))
+                if st.button("Logout", key="logout_main"):
+                    del st.session_state["access_token"]
+                    del st.session_state["email"]
+                    st.rerun()
+            else:
+                scope_str = "https://www.googleapis.com/auth/calendar.events https://www.googleapis.com/auth/userinfo.email"
+                auth_url = f"https://accounts.google.com/o/oauth2/v2/auth?client_id={CLIENT_ID}&redirect_uri={urllib.parse.quote(REDIRECT_URI)}&response_type=code&scope={urllib.parse.quote(scope_str)}"
+                st.link_button("🔑 Login with Google to Sync Calendar", auth_url, use_container_width=True)
+
+        with col_right:
+            if "access_token" in st.session_state:
+                with st.expander("⚙️ Advanced Sync Settings"):
+                    st.write("Customize your reminder")
+                    adv_title = st.text_input("Event Title", value="☂️ 우산 챙기세요!")
+                    adv_notif = st.select_slider(
+                        "Reminder Notification",
+                        options=[30, 60, 180, 360, 720, 1440],
+                        value=720,
+                        format_func=lambda x: f"{x//60} hours before" if x >= 60 else f"{x} mins before"
+                    )
+                    if st.button("Sync with Custom Settings"):
+                        with st.spinner("Syncing to Google Calendar..."):
+                            result = sync_to_calendar(nx, ny, st.session_state.access_token, title=adv_title, notif=adv_notif)
+                            if "error" in result:
+                                st.error(result["error"])
+                            else:
+                                st.success("Custom sync complete!")
 
 # Detailed Data
 with st.expander("📊 View Raw Forecast Data"):

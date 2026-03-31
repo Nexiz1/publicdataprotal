@@ -20,8 +20,41 @@ def init_db():
             created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
         )
     ''')
+    cursor.execute('''
+        CREATE TABLE IF NOT EXISTS users (
+            email TEXT PRIMARY KEY,
+            lat REAL,
+            lon REAL,
+            updated_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
+        )
+    ''')
     conn.commit()
     conn.close()
+
+def save_user_location(email: str, lat: float, lon: float):
+    if not email:
+        return
+    conn = sqlite3.connect(DB_PATH)
+    cursor = conn.cursor()
+    cursor.execute('''
+        INSERT INTO users (email, lat, lon, updated_at) 
+        VALUES (?, ?, ?, CURRENT_TIMESTAMP)
+        ON CONFLICT(email) DO UPDATE SET lat=excluded.lat, lon=excluded.lon, updated_at=CURRENT_TIMESTAMP
+    ''', (email, lat, lon))
+    conn.commit()
+    conn.close()
+
+def get_user_location(email: str):
+    if not email:
+        return None
+    conn = sqlite3.connect(DB_PATH)
+    cursor = conn.cursor()
+    cursor.execute('SELECT lat, lon FROM users WHERE email = ?', (email,))
+    row = cursor.fetchone()
+    conn.close()
+    if row:
+        return {"lat": row[0], "lon": row[1]}
+    return None
 
 def insert_forecast_items(items: list):
     if not items:
