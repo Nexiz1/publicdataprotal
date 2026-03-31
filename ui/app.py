@@ -15,9 +15,12 @@ load_dotenv()  # Load variables from .env file
 sys.path.append(os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 
 from core.utils import map_to_grid
-from core.database import get_user_location, save_user_location
+from core.database import (
+    get_user_location, save_user_location, 
+    save_user_refresh_token, get_user_sync_preference, save_user_sync_preference
+)
 
-API_BASE_URL = "http://127.0.0.1:8000"
+API_BASE_URL = os.getenv("API_BASE_URL", "http://127.0.0.1:8000")
 
 st.set_page_config(
     page_title="SkyCast — Umbrella Reminder",
@@ -128,6 +131,11 @@ def do_oauth_exchange():
                 if saved_loc:
                     st.session_state.lat = saved_loc["lat"]
                     st.session_state.lon = saved_loc["lon"]
+                
+                # If this login flow yielded a refresh token, save it for the background sync job
+                if "refresh_token" in token_data:
+                    save_user_refresh_token(email, token_data["refresh_token"])
+                    
         st.query_params.clear()
         st.rerun()
 
@@ -147,6 +155,24 @@ def search_address_list(query):
     except Exception as e:
         st.error(f"Search failed: {e}")
     return []
+
+@st.cache_data(ttl=86400, show_spinner=False)
+def reverse_geocode(lat, lon):
+    """위도, 경도를 바탕으로 실제 도로명 주소를 반환 (캐싱 처리)"""
+    try:
+        url = "https://nominatim.openstreetmap.org/reverse"
+        headers = {"User-Agent": "SkyCast-Umbrella-App"}
+        params = {"lat": lat, "lon": lon, "format": "json"}
+        resp = requests.get(url, headers=headers, params=params, timeout=5)
+        if resp.status_code == 200:
+            name = resp.json().get("display_name")
+            if name:
+                # 너무 길면 쉼표 기준으로 자르기
+                parts = name.split(", ")
+                return ", ".join(parts[:3]) if len(parts) > 3 else name
+    except Exception:
+        pass
+    return f"{lat:.4f}, {lon:.4f}"
 
 @st.cache_data(ttl=1800, show_spinner="기상청 예보 데이터를 분석 중입니다... ⛅")
 def fetch_analysis_cached(nx, ny):
@@ -207,17 +233,21 @@ with st.sidebar:
     folium.Marker([st.session_state.lat, st.session_state.lon], tooltip="Your Location").add_to(m)
     
     # catch clicks from the map
-    map_data = st_folium(m, height=300, use_container_width=True, returned_objects=["last_clicked"])
+    map_data = st_folium(m, height=300, use_container_width=True, returned_objects=["last_clicked"], key="map_interaction")
     if map_data and map_data.get("last_clicked"):
         clicked_lat = map_data["last_clicked"]["lat"]
         clicked_lon = map_data["last_clicked"]["lng"]
         
         # Avoid infinite reruns by checking if coordinate really changed
         if round(clicked_lat, 4) != round(st.session_state.lat, 4) or round(clicked_lon, 4) != round(st.session_state.lon, 4):
+            print(f">>> Map Click Detected! New: {clicked_lat}, {clicked_lon} (Was: {st.session_state.lat}, {st.session_state.lon})")
             st.session_state.lat = clicked_lat
             st.session_state.lon = clicked_lon
             if "email" in st.session_state:
+                print(f">>> Saving to DB for {st.session_state.email}...")
                 save_user_location(st.session_state.email, st.session_state.lat, st.session_state.lon)
+                print(">>> Saving to DB... Done!")
+            print(">>> Rerunning Streamlit UI...")
             st.rerun()
             
     st.markdown("---")
@@ -239,12 +269,20 @@ with st.sidebar:
             st.rerun()
     else:
         scope_str = "https://www.googleapis.com/auth/calendar.events https://www.googleapis.com/auth/userinfo.email"
-        auth_url = f"https://accounts.google.com/o/oauth2/v2/auth?client_id={CLIENT_ID}&redirect_uri={urllib.parse.quote(REDIRECT_URI)}&response_type=code&scope={urllib.parse.quote(scope_str)}"
+        auth_url = f"https://accounts.google.com/o/oauth2/v2/auth?client_id={CLIENT_ID}&redirect_uri={urllib.parse.quote(REDIRECT_URI)}&response_type=code&scope={urllib.parse.quote(scope_str)}&access_type=offline&prompt=consent"
         st.link_button("🔑 Login with Google to Sync Calendar", auth_url, use_container_width=True)
 
 # --- Main UI ---
 st.title("☂️ SkyCast")
 st.markdown("##### Intelligent Weather Insights & Smart Calendar Sync")
+
+# Fetch Human-readable address
+current_address = reverse_geocode(st.session_state.lat, st.session_state.lon)
+st.markdown(f"""
+    <div style="font-size: 1.15rem; color: inherit; opacity: 0.7; margin-bottom: 20px; font-weight: 400; letter-spacing: 0.4px;">
+        📍 {current_address}
+    </div>
+""", unsafe_allow_html=True)
 
 # Grid Info
 nx, ny = map_to_grid(st.session_state.lat, st.session_state.lon)
@@ -301,6 +339,18 @@ else:
             
             if "access_token" in st.session_state:
                 st.success(f"Logged in as: {st.session_state.email}")
+                
+                # Background Sync Toggle
+                if "sync_enabled" not in st.session_state:
+                    st.session_state.sync_enabled = get_user_sync_preference(st.session_state.email)
+                
+                # We use a unique key for the toggle
+                is_sync_on = st.toggle("🔔 매일 아침 6시 자동 동기화 허용", value=st.session_state.sync_enabled, key="bg_sync_toggle")
+                if is_sync_on != st.session_state.sync_enabled:
+                    st.session_state.sync_enabled = is_sync_on
+                    save_user_sync_preference(st.session_state.email, is_sync_on)
+                    st.toast(f"자동 동기화가 {'켜졌습니다' if is_sync_on else '꺼졌습니다'}.")
+
                 if st.button("🚀 Sync All Rainy Days Now", key="sync_btn"):
                     with st.spinner("Syncing to Google Calendar..."):
                         result = sync_to_calendar(nx, ny, st.session_state.access_token)
@@ -320,7 +370,7 @@ else:
                     st.rerun()
             else:
                 scope_str = "https://www.googleapis.com/auth/calendar.events https://www.googleapis.com/auth/userinfo.email"
-                auth_url = f"https://accounts.google.com/o/oauth2/v2/auth?client_id={CLIENT_ID}&redirect_uri={urllib.parse.quote(REDIRECT_URI)}&response_type=code&scope={urllib.parse.quote(scope_str)}"
+                auth_url = f"https://accounts.google.com/o/oauth2/v2/auth?client_id={CLIENT_ID}&redirect_uri={urllib.parse.quote(REDIRECT_URI)}&response_type=code&scope={urllib.parse.quote(scope_str)}&access_type=offline&prompt=consent"
                 st.link_button("🔑 Login with Google to Sync Calendar", auth_url, use_container_width=True)
 
         with col_right:

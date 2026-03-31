@@ -9,8 +9,8 @@ class ShortTermForecastRequest(BaseModel):
     pageNo: int = Field(default=1, description="페이지 번호")
     numOfRows: int = Field(default=1000, description="한 페이지 결과 수")
     dataType: str = Field(default="JSON", description="응답자료형식 (XML/JSON)")
-    base_date: str = Field(..., example="20241128", description="발표일자 (YYYYMMDD)")
-    base_time: str = Field(..., example="0500", description="발표시각 (HHMM)")
+    base_date: Optional[str] = Field(default=None, example="20241128", description="발표일자 (YYYYMMDD)")
+    base_time: Optional[str] = Field(default=None, example="0500", description="발표시각 (HHMM)")
     nx: int = Field(..., example=55, description="예보지점 X 좌표")
     ny: int = Field(..., example=127, description="예보지점 Y 좌표")
 

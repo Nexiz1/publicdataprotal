@@ -1,31 +1,32 @@
+version: '3.8'
+
 services:
   api:
     build:
       context: .
       dockerfile: Dockerfile.api
+    container_name: skycast_backend
     ports:
       - "8000:8000"
-    volumes:
-      - ./api:/app/api
-      - ./core:/app/core
-      - ./credentials:/app/credentials
     env_file:
       - .env
-    environment:
-      - PYTHONUNBUFFERED=1
+    volumes:
+      - ./skycast.db:/app/skycast.db   # 로컬 SQLite DB와 정보 보존 동기화
+    restart: always
 
   ui:
     build:
       context: .
       dockerfile: Dockerfile.ui
+    container_name: skycast_frontend
     ports:
       - "8501:8501"
-    volumes:
-      - ./ui:/app/ui
-      - ./core:/app/core
     env_file:
       - .env
     environment:
-      - PYTHONUNBUFFERED=1
+      - API_BASE_URL=http://api:8000    # 도커 내부망에서의 백엔드 호스트 라우팅
+    volumes:
+      - ./skycast.db:/app/skycast.db
     depends_on:
       - api
+    restart: always
