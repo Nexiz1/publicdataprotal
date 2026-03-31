@@ -1,6 +1,10 @@
 __pycache__/
 .env
 venv/
+.venv/
 credentials/client_secret.json
+credentials/token.json
+data/*.db
+data/user_prefs.json
 .DS_Store
 *.pyc
